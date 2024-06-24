@@ -20,7 +20,7 @@ The point of this exercise is to demonstrate how you think analytically as much 
 
 ```{r project setup, include = FALSE, echo = FALSE}
 # markdown settings -------------------------------------------------------
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
 
 # functions ---------------------------------------------------------------
 install_and_load_packages <- function(packages){
@@ -32,7 +32,8 @@ install_and_load_packages <- function(packages){
 }
 
 # load packages -----------------------------------------------------------
-project_packages <- c("openxlsx", "janitor", "dplyr", "scales", "lubridate")
+project_packages <- c("openxlsx", "janitor", "dplyr", "scales", "lubridate",
+                      "ggplot2", "zoo", "survival")
 
 install_and_load_packages(project_packages)
 ```
@@ -164,15 +165,15 @@ bookings_during_extraction %>%
 
 ### 4. Consider the length of stay (LOS): the duration of each booking. Describe the LOS over the year analysis period. What insights (statistical and otherwise) does it provide you about variations in the jail population?
 
-To look at length of stay during the analysis period, I think it is best to look at the bookings that occurred from July 1, 2021 to June 30, 2022.
+To look at length of stay during the analysis period, I think it is best to look at the bookings that were from July 1, 2021 to June 30, 2022. This include people who were booked before the time period, but not released.
 
-- About 51.3% of bookings had a length of stay of 2 days
-- the most frequent length of stay being 1 day.
-- There are about 25% of bookings that ranged from 10 days to 385.
-- About 76% of people were only booked once
+- About 48.5% of bookings had a length of stay of at least 2 days.
+- The most frequent length of stay being 1 day.
+- There are about 25% of bookings that ranged from 14 days to 1,719.
+- About 75.3% of people were only booked once
 
-```{r length of stay}
-los_data <- bookings_in_analysis_period %>% 
+```{r length of stay descriptive stats review}
+los_data <- bookings_during_extraction %>% 
   # remove bookings with no release date
   filter(!is.na(release_out)) %>% 
   # calculate length of stay
@@ -193,24 +194,62 @@ los_data %>%
   slice(1:21)
 
 los_data %>% 
-  mutate(grouped_los = ifelse(length_of_stay >= 10, "10+", length_of_stay),
-         grouped_los = factor(grouped_los, levels = c(0:9, "10+"))) %>% 
+  mutate(grouped_los = ifelse(length_of_stay >= 14, "14+", length_of_stay),
+         grouped_los = factor(grouped_los, levels = c(0:13, "14+"))) %>% 
   tabyl(grouped_los) %>% 
   adorn_pct_formatting()
 
-# how many times are people rebooked
+# how many times are people rebooked (booked at least one time)
 rebooking <- los_data %>% 
   arrange(person_id, date_in) %>% 
   group_by(person_id) %>% 
   mutate(frequency_booked = 1:n()) %>% 
-  ungroup()
-
-rebooking %>% 
+  ungroup() %>% 
   arrange(person_id, desc(frequency_booked)) %>% 
   distinct(person_id, .keep_all = T) %>% 
+  mutate(booked_multiple_times = ifelse(frequency_booked >= 2, "2+", "1")) 
+
+# review the total times people have been booked
+rebooking %>% 
   tabyl(frequency_booked) %>% 
   adorn_pct_formatting()
+
+# review how many people have been booked more than once
+rebooking %>% 
+  tabyl(booked_multiple_times) %>% 
+  adorn_pct_formatting()
 ```
+
+From the review of the distribution, a survival analysis would make the most sense. In this scenario, we would be trying to understand the amount of time it takes a person who was booked to be released from jail during our analysis period. This data set should include people who were in jail before the analysis period as well, but were not yet released.
+
+- release dates after study period are considered censored event
+- release dates that are missing are considered a censored event
+
+```{r, length of stay survival analysis}
+# create the event flag and create a time flag that represents length of stay
+# remembering that this length of stay is until the end of the study period
+survival_data <- bookings_during_extraction %>% 
+  mutate(event = case_when(
+    is.na(release_out) ~ 0,
+    release_out > "2022-06-30" ~ 0,
+    T ~ 1)) %>% 
+  mutate(time = case_when(
+    is.na(release_out) ~ as.numeric(ymd("2022-06-30") - date_in),
+    release_out > "2022-06-30" ~ as.numeric(ymd("2022-06-30") - date_in),
+    T ~ as.numeric(release_out - date_in)
+  )) %>% 
+  select(booking_number, time, event)
+
+# calculate the Kaplan-Meier estimate
+km <- survfit(Surv(time, event) ~ 1,
+  data = survival_data
+)
+
+km
+
+summary(km)$table["median"]
+```
+A next step would be to examine if an individual being booked again during the study period would impact their length of stay of examine length of stay by demographics.
 
 ---
 
@@ -248,7 +287,25 @@ bookings_by_day <- booking_long %>%
   ungroup() %>% 
   rename(daily_population = n)
 
-mean(bookings_by_day$daily_population)
+# What is the average daily population for the analysis period?
+(average_daily_population <- mean(bookings_by_day$daily_population))
+
+# what does the daily population look like overtime? note using a moving average
+# to smooth the estimates a little
+bookings_by_day %>% 
+  mutate(seven_day_moving_average = zoo::rollmean(daily_population, k = 7, fill = NA)) %>% 
+  ggplot(aes(x = date, y = daily_population)) + 
+  geom_point(alpha = 0.5, size = 1) +
+  geom_line(aes(x = date, y = seven_day_moving_average), color = "red", size = 1.5) +
+  scale_y_continuous(limit = c(1000, 2000), labels = comma)
+
+# View the daily population against the average daily population. Around
+# what months is the daily population greater than the average?
+bookings_by_day %>% 
+  ggplot(aes(x = date, y = daily_population)) + 
+  geom_hline(aes(yintercept = average_daily_population), color = "red", size = 1, linetype = "dashed") + 
+  geom_point(alpha = 0.5, size = 1) +
+  scale_y_continuous(limit = c(1000, 2000), labels = comma)
 ```
 
 ---
