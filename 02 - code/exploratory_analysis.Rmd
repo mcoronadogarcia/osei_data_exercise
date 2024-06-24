@@ -1,0 +1,274 @@
+---
+title: "OSEI Senior Data Analyst Exercise: Exploratory Analysis"
+author: "Mayra Smith-Coronado"
+date: "2024-06-24"
+output: pdf_document
+---
+
+```{r markdown setup, include=FALSE, eval = FALSE}
+# to view pdf outputs from the markdown use the following lines of code
+# in the console
+install.packages(tinytex)
+tinytex::install_tinytex()
+```
+
+## Intro
+
+The included datasets come from two tables within the DSD relational database: Incarceration and Person. The incarceration table’s unit of analysis is one booking into the jail and includes booking-related data such as the times into and out of the jail. The person table’s unit of analysis is one person and includes demographic information like age and race. The “Person_id” column is the common variable between them. (For this exercise, the real Person_id has been suppressed and replaced with a unique random number to protect identities.)
+
+The point of this exercise is to demonstrate how you think analytically as much as it is to arrive at the “correct” answers. Please provide your best answers to the questions below, using the tools and methods you deem most effective. Please submit written answers in a clear and concise form by the deadline. **Please also share your code so we can review it.**
+
+```{r project setup, include = FALSE, echo = FALSE}
+# markdown settings -------------------------------------------------------
+knitr::opts_chunk$set(echo = TRUE)
+
+# functions ---------------------------------------------------------------
+install_and_load_packages <- function(packages){
+  # find packages missing and install
+  new_packages <- setdiff(packages, rownames(installed.packages()))
+  install.packages(new_packages)
+  # load packages
+  invisible(lapply(packages, library, character.only = TRUE))
+}
+
+# load packages -----------------------------------------------------------
+project_packages <- c("openxlsx", "janitor", "dplyr", "scales", "lubridate")
+
+install_and_load_packages(project_packages)
+```
+
+
+
+```{r load data, warning = FALSE}
+# Load in Incarceration Data ----------------------------------------------
+# note time is not going to be read in for this data set, only date information
+incarceration_data <- read.xlsx("~/osei_data_exercise/01 - data/Incarceration.xlsx") %>% 
+  # convert to tibble
+  tibble() %>% 
+  # update column names to follow snake case naming convention
+  janitor::clean_names() %>% 
+  # correctly read excel dates as dates instead of numeric values
+  mutate(across(.cols = c("date_in", "release_out"),
+                .fns = janitor::excel_numeric_to_date))
+
+# check to make sure that there are no duplicate booking numbers and that
+# each row represents one booking
+incarceration_data %>% 
+  count(booking_number) %>% 
+  filter(n > 1)
+
+# Load in Person Data -----------------------------------------------------
+person_data <- read.xlsx("~/osei_data_exercise/01 - data/Person.xlsx") %>% 
+  # convert to tibble
+  tibble() %>% 
+  # update column names to follow snake case naming convention
+  janitor::clean_names() %>% 
+  # correctly read excel dates as dates instead of numeric values
+  mutate(across(.cols = c("dob"),
+                .fns = janitor::excel_numeric_to_date))
+
+# check to make sure that there are no duplicate people and that
+# each row represents one person
+person_data %>% 
+  count(person_id) %>% 
+  filter(n > 1)
+```
+
+## Exercise
+
+Consider the year from July 1, 2021 to June 30, 2022 as the analysis period.
+
+---
+
+### 1. How many total bookings into the jail were there in that time period?
+
+```{r booking total}
+bookings_in_analysis_period <- incarceration_data %>% 
+  filter(date_in >= "2021-07-01" &
+           date_in <= "2022-06-30")
+
+nrow(bookings_in_analysis_period) %>% 
+  scales::comma()
+```
+
+---
+
+### 2. How many unique people were booked into the jail?
+
+```{r people incarcerated}
+bookings_in_analysis_period %>% 
+  select(person_id) %>% 
+  distinct() %>% 
+  count() %>% 
+  pull() %>% 
+  scales::comma()
+```
+
+---
+
+### 3. How many people were in the jail at the moment of the data extraction?
+
+This would include not only the people who were booked during the analysis period, but the people who were booked before analysis period, but were not yet released
+
+```{r people during extraction}
+# gather bookings where a person was booked before the analysis period, but
+# has no release date
+bookings_still_incarcerated <- incarceration_data %>% 
+  filter(date_in < "2021-07-01",
+         is.na(release_out))
+
+nrow(bookings_still_incarcerated) %>% 
+  scales::comma()
+
+bookings_still_incarcerated %>% 
+  summarise(first_booking = min(date_in),
+            last_booking = max(date_in))
+
+# gather bookings where a person was booked before the analysis period,
+# but they were released within the analysis period
+bookings_released_during_extraction <- incarceration_data %>% 
+  filter(date_in < "2021-07-01",
+         release_out >= "2021-07-01" &
+           release_out <= "2022-06-30")
+
+nrow(bookings_released_during_extraction) %>% 
+  scales::comma()
+
+bookings_released_during_extraction %>% 
+  summarise(first_release = min(release_out),
+            last_release = max(release_out))
+  
+# now create a table with all the bookings that we have identified to 
+# have occurred during the extraction and bookings that 
+# occurred before the extraction, but were not yet released
+bookings_during_extraction <- bookings_in_analysis_period %>% 
+  bind_rows(bookings_still_incarcerated) %>% 
+  bind_rows(bookings_released_during_extraction)
+
+# verify no duplicate bookings
+bookings_during_extraction %>% 
+  count(booking_number) %>% 
+  filter(n > 1)
+
+# now count the number of people in jail at the moment of the 
+# data extraction
+bookings_during_extraction %>% 
+  select(person_id) %>% 
+  distinct() %>% 
+  count() %>% 
+  pull() %>% 
+  scales::comma()
+```
+
+---
+
+### 4. Consider the length of stay (LOS): the duration of each booking. Describe the LOS over the year analysis period. What insights (statistical and otherwise) does it provide you about variations in the jail population?
+
+To look at length of stay during the analysis period, I think it is best to look at the bookings that occurred from July 1, 2021 to June 30, 2022.
+
+- About 51.3% of bookings had a length of stay of 2 days
+- the most frequent length of stay being 1 day.
+- There are about 25% of bookings that ranged from 10 days to 385.
+- About 76% of people were only booked once
+
+```{r length of stay}
+los_data <- bookings_in_analysis_period %>% 
+  # remove bookings with no release date
+  filter(!is.na(release_out)) %>% 
+  # calculate length of stay
+  mutate(length_of_stay = as.numeric(release_out - date_in))
+
+
+# examine the distribution of the length of stay for this analysis period
+hist(los_data$length_of_stay)
+
+# get descriptive statistics to better understand the distribution
+los_data %>% 
+  select(length_of_stay) %>%
+  summary()
+
+los_data %>% 
+  tabyl(length_of_stay) %>% 
+  adorn_pct_formatting() %>% 
+  slice(1:21)
+
+los_data %>% 
+  mutate(grouped_los = ifelse(length_of_stay >= 10, "10+", length_of_stay),
+         grouped_los = factor(grouped_los, levels = c(0:9, "10+"))) %>% 
+  tabyl(grouped_los) %>% 
+  adorn_pct_formatting()
+
+# how many times are people rebooked
+rebooking <- los_data %>% 
+  arrange(person_id, date_in) %>% 
+  group_by(person_id) %>% 
+  mutate(frequency_booked = 1:n()) %>% 
+  ungroup()
+
+rebooking %>% 
+  arrange(person_id, desc(frequency_booked)) %>% 
+  distinct(person_id, .keep_all = T) %>% 
+  tabyl(frequency_booked) %>% 
+  adorn_pct_formatting()
+```
+
+---
+
+### 5. What was the average daily population in the jail during that year? Daily population ought to include anyone who spent even one minute in the jail in a given day. Please describe the methods/approach you used to answer this question. What tool did you use? What functions or other capabilities within the tool? (That is, help another analyst replicate what you did. Sharing code with your answers is encouraged but by no means required.)
+
+```{r daily booking dataset}
+booking_long = NULL
+
+for(ith_booking in 1:nrow(bookings_during_extraction)){
+  
+  booking = bookings_during_extraction[ith_booking, ]
+  
+  if(!is.na(booking$release_out)) {
+    release_out <- booking$release_out
+  } else {
+     release_out = as.Date("2022-06-30")
+  }
+  
+  dates_incarcerated = seq(booking$date_in, release_out, by = "1 day")
+  ith_booking_long <- tibble(date = dates_incarcerated,
+                             booking_number = booking$booking_number,
+                             person_id = booking$person_id)
+  booking_long <- booking_long %>%
+    bind_rows(ith_booking_long)
+}
+```
+
+```{r daily population}
+# count the number of people in jail each day
+bookings_by_day <- booking_long %>% 
+  filter(date >= "2021-07-01" & date <= "2022-06-30") %>% 
+  arrange(date) %>% 
+  group_by(date) %>% 
+  count() %>% 
+  ungroup() %>% 
+  rename(daily_population = n)
+
+mean(bookings_by_day$daily_population)
+```
+
+---
+
+### 6. Which day during that year had the lowest daily population? What was the population that day? Which day had the highest daily population? What was the population that day?
+
+```{r}
+# date with the min population 
+bookings_by_day %>% 
+  filter(daily_population == min(daily_population))
+
+# date with the max population 
+bookings_by_day %>% 
+  filter(daily_population == max(daily_population))
+```
+
+--- 
+
+### 7. Please provide a basic analysis of jail demographics during that year period. Are there meaningful statistical relationships among the different groups in the jail?
+
+---
+
+### 8. What other insights, useful facts, or questions/concerns did you uncover, if any, in the data?

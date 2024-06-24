@@ -1,3 +1,9 @@
+## Project Space Setup
+1. If you have github, create a clone of the repo using R Studio.
+1. In the cloned repository, add the following folder to the project: "01 - data"
+1. Download and save the *Incarceration.xlsx* and *Person.xlsx* into the "01 - data" project folder.
+1. In order to knit the R markdown file into a pdf, LaTex software must be installed. The easiest method to do this is by typing the following line of code in the console `install.packages(tinytex)`. After that line of code is executed, run `tinytex::install_tinytex()` in the console as well.
+
 ## OSEI Senior Data Analyst Exercise
 June 2024
 
