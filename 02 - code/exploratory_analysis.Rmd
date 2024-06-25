@@ -33,11 +33,10 @@ install_and_load_packages <- function(packages){
 
 # load packages -----------------------------------------------------------
 project_packages <- c("openxlsx", "janitor", "dplyr", "scales", "lubridate",
-                      "ggplot2", "zoo", "survival")
+                      "ggplot2", "zoo", "survival", "survminer", "coin")
 
 install_and_load_packages(project_packages)
 ```
-
 
 
 ```{r load data, warning = FALSE}
@@ -165,19 +164,19 @@ bookings_during_extraction %>%
 
 ### 4. Consider the length of stay (LOS): the duration of each booking. Describe the LOS over the year analysis period. What insights (statistical and otherwise) does it provide you about variations in the jail population?
 
-To look at length of stay during the analysis period, I think it is best to look at the bookings that were from July 1, 2021 to June 30, 2022. This include people who were booked before the time period, but not released.
+To look at length of stay during the analysis period, I think it is best to look at the bookings that were from July 1, 2021 to June 30, 2022.
 
-- About 48.5% of bookings had a length of stay of at least 2 days.
-- The most frequent length of stay being 1 day.
-- There are about 25% of bookings that ranged from 14 days to 1,719.
+- About 48.5% of bookings had a length of stay of at least 3 days.
+- The most frequent length of stay being 2 day.
+- There are about 25% of bookings that ranged from 10 days to 386.
 - About 75.3% of people were only booked once
 
 ```{r length of stay descriptive stats review}
-los_data <- bookings_during_extraction %>% 
+los_data <- bookings_in_analysis_period %>% 
   # remove bookings with no release date
   filter(!is.na(release_out)) %>% 
   # calculate length of stay
-  mutate(length_of_stay = as.numeric(release_out - date_in))
+  mutate(length_of_stay = as.numeric(release_out - date_in) + 1)
 
 
 # examine the distribution of the length of stay for this analysis period
@@ -194,8 +193,8 @@ los_data %>%
   slice(1:21)
 
 los_data %>% 
-  mutate(grouped_los = ifelse(length_of_stay >= 14, "14+", length_of_stay),
-         grouped_los = factor(grouped_los, levels = c(0:13, "14+"))) %>% 
+  mutate(grouped_los = ifelse(length_of_stay >= 10, "10+", length_of_stay),
+         grouped_los = factor(grouped_los, levels = c(0:9, "10+"))) %>% 
   tabyl(grouped_los) %>% 
   adorn_pct_formatting()
 
@@ -220,62 +219,84 @@ rebooking %>%
   adorn_pct_formatting()
 ```
 
-From the review of the distribution, a survival analysis would make the most sense. In this scenario, we would be trying to understand the amount of time it takes a person who was booked to be released from jail during our analysis period. This data set should include people who were in jail before the analysis period as well, but were not yet released.
+From the review of the distribution, a survival analysis would make the most sense. In this scenario, we would be trying to understand the amount of time it takes a person who was booked to be released from jail during our analysis period.
 
-- release dates after study period are considered censored event
-- release dates that are missing are considered a censored event
+- release dates after study period are considered censored event.
+- release dates that are missing are considered a censored event.
 
 ```{r, length of stay survival analysis}
 # create the event flag and create a time flag that represents length of stay
 # remembering that this length of stay is until the end of the study period
-survival_data <- bookings_during_extraction %>% 
+survival_data <- bookings_in_analysis_period %>% 
   mutate(event = case_when(
     is.na(release_out) ~ 0,
     release_out > "2022-06-30" ~ 0,
     T ~ 1)) %>% 
   mutate(time = case_when(
-    is.na(release_out) ~ as.numeric(ymd("2022-06-30") - date_in),
-    release_out > "2022-06-30" ~ as.numeric(ymd("2022-06-30") - date_in),
-    T ~ as.numeric(release_out - date_in)
+    is.na(release_out) ~ as.numeric(ymd("2022-06-30") - date_in) + 1,
+    release_out > "2022-06-30" ~ as.numeric(ymd("2022-06-30") - date_in) + 1,
+    T ~ as.numeric(release_out - date_in) + 1
   )) %>% 
   select(booking_number, time, event)
 
+# check the number of events (releases) that occurred during the analysis period
+survival_data %>% 
+  tabyl(event) %>% 
+  adorn_pct_formatting()
+
 # calculate the Kaplan-Meier estimate
-km <- survfit(Surv(time, event) ~ 1,
+km <- survival::survfit(Surv(time, event) ~ 1,
   data = survival_data
 )
 
 km
 
-summary(km)$table["median"]
+# examine a graph of the probablity of release
+survminer::ggsurvplot(km,
+  conf.int = FALSE,
+  surv.median.line = "hv",
+  legend = "none"
+)
 ```
-A next step would be to examine if an individual being booked again during the study period would impact their length of stay of examine length of stay by demographics.
+From this analysis, the median release time for a person can be estimated to be 4 days, with a 95% CI [4,4]. A next step would be to examine if an individual being booked again during the study period would impact their length of stay.
 
 ---
 
 ### 5. What was the average daily population in the jail during that year? Daily population ought to include anyone who spent even one minute in the jail in a given day. Please describe the methods/approach you used to answer this question. What tool did you use? What functions or other capabilities within the tool? (That is, help another analyst replicate what you did. Sharing code with your answers is encouraged but by no means required.)
 
+Use a for loop to create a dataset where if a booking occurred from monday to friday (5 days) the booking will be spread across 5 rows. This will create a dataset where we can look at who was in the jail each day of the analysis period. In order to correctly capture all the individuals in the jail during this time, we will use the dataset `bookings_during_extraction` created in question 3.
+
 ```{r daily booking dataset}
+# initialize table
 booking_long = NULL
 
 for(ith_booking in 1:nrow(bookings_during_extraction)){
   
+  # gather the current bookings information
   booking = bookings_during_extraction[ith_booking, ]
   
+  # if release date is missing, set this to the last day of the analysis period
+  # to capture each individual, even people who are still in jail after the analysis time constraint
   if(!is.na(booking$release_out)) {
     release_out <- booking$release_out
   } else {
      release_out = as.Date("2022-06-30")
   }
   
+  # convert the booking row into a long table where each row represents a day
+  # the person was in jail based on their current booking.
   dates_incarcerated = seq(booking$date_in, release_out, by = "1 day")
   ith_booking_long <- tibble(date = dates_incarcerated,
                              booking_number = booking$booking_number,
                              person_id = booking$person_id)
+  
+  # combine the current bookings table with the larger dataset.
   booking_long <- booking_long %>%
     bind_rows(ith_booking_long)
 }
 ```
+
+Now that we have a dataset where a bookings length of stay is spreadout by date, we can look at the daily population.
 
 ```{r daily population}
 # count the number of people in jail each day
@@ -313,11 +334,11 @@ bookings_by_day %>%
 ### 6. Which day during that year had the lowest daily population? What was the population that day? Which day had the highest daily population? What was the population that day?
 
 ```{r}
-# date with the min population 
+# date with the lowest daily population 
 bookings_by_day %>% 
   filter(daily_population == min(daily_population))
 
-# date with the max population 
+# date with the highest daily  population 
 bookings_by_day %>% 
   filter(daily_population == max(daily_population))
 ```
@@ -325,6 +346,80 @@ bookings_by_day %>%
 --- 
 
 ### 7. Please provide a basic analysis of jail demographics during that year period. Are there meaningful statistical relationships among the different groups in the jail?
+
+```{r booking demographic review}
+booking_demographics <- bookings_in_analysis_period %>% 
+  # remove people with a missing release date
+  filter(!is.na(release_out)) %>% 
+  # add in demographic data
+  left_join(person_data) %>% 
+  mutate(age_at_booking = floor(interval(dob, date_in) / years(1))) %>%
+  # calculate length of stay
+  mutate(length_of_stay = as.numeric(release_out - date_in) + 1)
+
+# descriptive stats by gender & length of stay distribution
+booking_demographics %>% 
+  group_by(gender) %>% 
+  summarise(n = n(),
+            median_los = median(length_of_stay),
+            mean_los = mean(length_of_stay)) %>% 
+  ungroup() %>% 
+  mutate(total = sum(n),
+         pct_of_total = scales::percent(n/total)) %>% 
+  select(gender, n, pct_of_total, median_los, mean_los)
+
+booking_demographics %>% 
+  ggplot(aes(x = length_of_stay)) +
+  geom_histogram() +
+  facet_grid(gender ~ .) +
+  theme_minimal()
+
+# descriptive stats by race & length of stay distribution
+booking_demographics %>% 
+  group_by(race) %>% 
+  summarise(n = n(),
+            median_los = median(length_of_stay),
+            mean_los = mean(length_of_stay)) %>% 
+  ungroup() %>% 
+  mutate(total = sum(n),
+         pct_of_total = scales::percent(n/total)) %>% 
+  select(race, n, pct_of_total, median_los, mean_los)
+
+booking_demographics %>% 
+  ggplot(aes(x = length_of_stay)) +
+  geom_histogram() +
+  facet_grid(race ~ .) +
+  theme_minimal()
+
+# descriptive stats by age
+booking_demographics %>% 
+  filter(!is.na(age_at_booking)) %>% 
+  group_by(age_at_booking) %>% 
+  summarise(n = n(),
+            median_los = median(length_of_stay),
+            mean_los = mean(length_of_stay)) %>% 
+  ungroup() %>% 
+  mutate(total = sum(n),
+         pct_of_total = scales::percent(n/total)) %>% 
+  select(age_at_booking, n, pct_of_total, median_los, mean_los)
+```
+
+```{r booking median analysis}
+
+max_los = max(booking_demographics$length_of_stay)
+# by gender there is a difference in median length of stay
+coin::median_test(inverse_los ~ factor(gender),
+                  data = booking_demographics %>% 
+                    mutate(inverse_los = (max_los + 1) - length_of_stay )
+                    )
+
+# by race there is a difference in median length of stay
+coin::median_test(inverse_los ~ factor(race),
+                  data = booking_demographics %>% 
+                    mutate(inverse_los = (max_los + 1) - length_of_stay )
+                    )
+```
+
 
 ---
 
