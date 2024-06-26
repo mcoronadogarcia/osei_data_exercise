@@ -1,0 +1,377 @@
+---
+title: "Final Report"
+author: "Mayra Smith-Coronado"
+date: "2024-06-26"
+output: pdf_document
+---
+```{r markdown setup, include=FALSE, eval = FALSE}
+# to view pdf outputs from the markdown use the following lines of code
+# in the console
+install.packages(tinytex)
+tinytex::install_tinytex()
+```
+
+## Intro
+
+The included datasets come from two tables within the DSD relational database: Incarceration and Person. The incarceration table’s unit of analysis is one booking into the jail and includes booking-related data such as the times into and out of the jail. The person table’s unit of analysis is one person and includes demographic information like age and race. The “Person_id” column is the common variable between them. (For this exercise, the real Person_id has been suppressed and replaced with a unique random number to protect identities.)
+
+The point of this exercise is to demonstrate how you think analytically as much as it is to arrive at the “correct” answers. Please provide your best answers to the questions below, using the tools and methods you deem most effective. Please submit written answers in a clear and concise form by the deadline. **Please also share your code so we can review it.**
+
+## Exercise
+
+Consider the year from July 1, 2021 to June 30, 2022 as the analysis period.
+
+```{r project setup, include = FALSE, echo = FALSE}
+# markdown settings -------------------------------------------------------
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, include = FALSE, echo = FALSE)
+
+# functions ---------------------------------------------------------------
+install_and_load_packages <- function(packages){
+  # find packages missing and install
+  new_packages <- setdiff(packages, rownames(installed.packages()))
+  install.packages(new_packages)
+  # load packages
+  invisible(lapply(packages, library, character.only = TRUE))
+}
+
+addline_format <- function(x,...){
+    gsub(' or ','\n',x)
+}
+
+
+# load packages -----------------------------------------------------------
+project_packages <- c("openxlsx", "janitor", "dplyr", "scales", "lubridate",
+                      "ggplot2", "zoo", "survival", "survminer", "coin")
+
+install_and_load_packages(project_packages)
+```
+
+
+```{r load data}
+# Load in Incarceration Data ----------------------------------------------
+# note time is not going to be read in for this data set, only date information
+incarceration_data <- read.xlsx("~/osei_data_exercise/01 - data/Incarceration.xlsx") %>% 
+  # convert to tibble
+  tibble() %>% 
+  # update column names to follow snake case naming convention
+  janitor::clean_names() %>% 
+  # correctly read excel dates as dates instead of numeric values
+  mutate(across(.cols = c("date_in", "release_out"),
+                .fns = janitor::excel_numeric_to_date))
+
+# check to make sure that there are no duplicate booking numbers and that
+# each row represents one booking
+incarceration_data %>% 
+  count(booking_number) %>% 
+  filter(n > 1)
+
+# Load in Person Data -----------------------------------------------------
+person_data <- read.xlsx("~/osei_data_exercise/01 - data/Person.xlsx") %>% 
+  # convert to tibble
+  tibble() %>% 
+  # update column names to follow snake case naming convention
+  janitor::clean_names() %>% 
+  # correctly read excel dates as dates instead of numeric values
+  mutate(across(.cols = c("dob"),
+                .fns = janitor::excel_numeric_to_date))
+
+# check to make sure that there are no duplicate people and that
+# each row represents one person
+person_data %>% 
+  count(person_id) %>% 
+  filter(n > 1)
+```
+
+
+---
+
+### 1. How many total bookings into the jail were there in that time period?
+
+```{r}
+
+bookings_in_analysis_period <- incarceration_data %>% 
+  filter(date_in >= "2021-07-01" &
+           date_in <= "2022-06-30")
+
+answer1 <- nrow(bookings_in_analysis_period) %>% 
+  scales::comma()
+```
+
+There were `r answer1` total bookings into the jail from July 1st, 2021 to June 30, 2022.
+
+---
+
+### 2. How many unique people were booked into the jail?
+
+```{r people incarcerated}
+answer2 <- bookings_in_analysis_period %>% 
+  select(person_id) %>% 
+  distinct() %>% 
+  count() %>% 
+  pull() %>% 
+  scales::comma()
+```
+
+There were `r answer2` unique people who were booked into the jail from July 1st, 2021 to June 30, 2022.
+
+---
+
+### 3. How many people were in the jail at the moment of the data extraction?
+
+```{r people during extraction}
+# gather bookings where a person was booked before the analysis period, but
+# has no release date
+bookings_still_incarcerated <- incarceration_data %>% 
+  filter(date_in < "2021-07-01",
+         is.na(release_out))
+
+# gather bookings where a person was booked before the analysis period,
+# but they were released within the analysis period
+bookings_released_during_extraction <- incarceration_data %>% 
+  filter(date_in < "2021-07-01",
+         release_out >= "2021-07-01" &
+           release_out <= "2022-06-30")
+
+# now create a table with all the bookings that we have identified to 
+# have occurred during the extraction and bookings that 
+# occurred before the extraction, but were not yet released
+bookings_during_extraction <- bookings_in_analysis_period %>% 
+  bind_rows(bookings_still_incarcerated) %>% 
+  bind_rows(bookings_released_during_extraction)
+
+# now count the number of people in jail at the moment of the 
+# data extraction
+answer3 <- bookings_during_extraction %>% 
+  select(person_id) %>% 
+  distinct() %>% 
+  count() %>% 
+  pull() %>% 
+  scales::comma()
+```
+
+This would include not only the people who were booked during the analysis period, but the people who were booked before analysis period, but were not yet released. Based on this understanding of the question, I estimated approximately `r answer3` people in the jail at the moment of the data extraction.
+
+---
+
+### 4. Consider the length of stay (LOS): the duration of each booking. Describe the LOS over the year analysis period. What insights (statistical and otherwise) does it provide you about variations in the jail population?
+
+```{r length of stay descriptive stats review}
+los_data <- bookings_in_analysis_period %>% 
+  # remove bookings with no release date
+  filter(!is.na(release_out)) %>% 
+  # calculate length of stay
+  mutate(length_of_stay = as.numeric(release_out - date_in) + 1)
+
+# median length of stay information
+median_los <- median(los_data$length_of_stay)
+median_and_less_count <- los_data %>%
+  filter(length_of_stay <= median_los) %>% 
+  count() %>% 
+  pull()
+percent_of_bookings_at_median_or_less <- median_and_less_count / nrow(los_data) 
+
+# most frequent length of stay
+most_frequent_los <- los_data %>% 
+  tabyl(length_of_stay) %>% 
+  adorn_pct_formatting() %>% 
+  filter(n == max(n))
+
+# third quntile to max los
+third_quartile <- quantile(los_data$length_of_stay, probs = 0.75)
+
+los_data %>% 
+  mutate(grouped_los = ifelse(length_of_stay >= 10, "10+", length_of_stay),
+         grouped_los = factor(grouped_los, levels = c(0:9, "10+"))) %>% 
+  tabyl(grouped_los) %>% 
+  adorn_pct_formatting()
+```
+
+To look at length of stay during the analysis period, I think it is best to look at the bookings that were from July 1, 2021 to June 30, 2022. Bookings missing a release date were excluded from the visual review. Overall, the data seems to suggest that the people who are detained in jail tend to be changing frequently, if a little over half the jail population is only detained for `r median_los` days or less. 
+
+- About `r scales::comma(median_and_less_count)` (`r scales::percent(percent_of_bookings_at_median_or_less, accuracy = 0.1)`) of bookings had a length of stay of at least `r median_los` days.
+- The most frequent length of stay being `r most_frequent_los$length_of_stay` days with a total of `r scales::comma(most_frequent_los$n)` (`r most_frequent_los$percent`).
+- There are about 25% of bookings that ranged from `r third_quartile` days to `r max(los_data$length_of_stay)`.
+
+```{r include = TRUE}
+# examine the distribution of the length of stay for this analysis period
+los_data %>% 
+  mutate(`LOS <= 3 days` = ifelse(length_of_stay <= 3, "Yes", "No")) %>% 
+  ggplot(aes(x = length_of_stay, fill = `LOS <= 3 days`)) +
+  geom_histogram(bins = 65) +
+  scale_fill_manual(values = c("#1F4045", "#EBCDC3")[2:1],
+                    guide = guide_legend(reverse = TRUE)) +
+  theme_minimal() +
+  scale_y_continuous("Frequency", labels = scales::comma) +
+  scale_x_continuous("Length of Stay")  + 
+  theme(legend.position = "top")
+```
+From reviewing the distribution of the length of stay, it was determined that our vairable of interest was positively skewed. To determine what the median length of stay was for this population with 95% certainty, a survival analysis would make the most sense. In this scenario, we would be trying to understand the amount of time it takes a person who was booked to be released from jail during our analysis period.
+
+```{r, length of stay survival analysis}
+# create the event flag and create a time flag that represents length of stay
+# remembering that this length of stay is until the end of the study period
+survival_data <- bookings_in_analysis_period %>% 
+  mutate(event = case_when(
+    is.na(release_out) ~ 0,
+    release_out > "2022-06-30" ~ 0,
+    T ~ 1)) %>% 
+  mutate(time = case_when(
+    is.na(release_out) ~ as.numeric(ymd("2022-06-30") - date_in) + 1,
+    release_out > "2022-06-30" ~ as.numeric(ymd("2022-06-30") - date_in) + 1,
+    T ~ as.numeric(release_out - date_in) + 1
+  )) %>% 
+  select(booking_number, time, event)
+
+# check the number of events (releases) that occurred during the analysis period
+survival_data %>% 
+  tabyl(event) %>% 
+  adorn_pct_formatting()
+
+# calculate the Kaplan-Meier estimate
+km <- survival::survfit(Surv(time, event) ~ 1,
+  data = survival_data
+)
+
+los_ci_lower <- unname(quantile(km, probs = 0.5)$lower)
+los_ci_upper <- unname(quantile(km, probs = 0.5)$upper)
+```
+
+From a survival analysis, the median release time for a person can be estimated to be `r unname(median(km))` days, with a 95% CI [`r los_ci_lower`,`r los_ci_upper`]. One thing to note is that this median does differ from our review of the descriptive statistics because in this data set we kept bookings with a missing date where these bookings were previously excluded. 
+
+```{r include = TRUE}
+# examine a graph of the probablity of release
+survminer::ggsurvplot(km,
+  conf.int = FALSE,
+  surv.median.line = "hv",
+  legend = "none"
+)
+```
+
+---
+
+### 5. What was the average daily population in the jail during that year? Daily population ought to include anyone who spent even one minute in the jail in a given day. Please describe the methods/approach you used to answer this question. What tool did you use? What functions or other capabilities within the tool? (That is, help another analyst replicate what you did. Sharing code with your answers is encouraged but by no means required.)
+
+Use a for loop to create a data set where if a booking occurred from Monday to Friday (5 days) the booking will be spread across 5 rows. This will create a data set where we can look at who was in jail each day of the analysis period. In order to correctly capture all the individuals in jail during this time, we will use the data set `bookings_during_extraction` created to answer question 3. The for loop I used can be found below. 
+
+```{r daily booking dataset, include = TRUE, echo = TRUE}
+# initialize table
+booking_long = NULL
+
+for(ith_booking in 1:nrow(bookings_during_extraction)){
+  
+  # gather the current bookings information
+  booking = bookings_during_extraction[ith_booking, ]
+  
+  # if release date is missing, set this to the last day of the analysis period
+  # to capture each individual, even people who are still in jail after the analysis time constraint
+  if(!is.na(booking$release_out)) {
+    release_out <- booking$release_out
+  } else {
+     release_out = as.Date("2022-06-30")
+  }
+  
+  # convert the booking row into a long table where each row represents a day
+  # the person was in jail based on their current booking.
+  dates_incarcerated = seq(booking$date_in, release_out, by = "1 day")
+  ith_booking_long <- tibble(date = dates_incarcerated,
+                             booking_number = booking$booking_number,
+                             person_id = booking$person_id)
+  
+  # combine the current bookings table with the larger data set.
+  booking_long <- booking_long %>%
+    bind_rows(ith_booking_long)
+}
+```
+
+Now that we have a data set where a bookings length of stay is spread out by date, we can look at the daily population. We can do this by counting the number of bookings by date. This will provide us the daily population for our analysis period.
+
+```{r daily population, include = TRUE, echo = TRUE}
+# count the number of people in jail each day
+bookings_by_day <- booking_long %>% 
+  filter(date >= "2021-07-01" & date <= "2022-06-30") %>% 
+  arrange(date) %>% 
+  group_by(date) %>% 
+  count() %>% 
+  ungroup() %>% 
+  rename(daily_population = n)
+
+# What is the average daily population for the analysis period?
+(average_daily_population <- mean(bookings_by_day$daily_population))
+```
+
+From the calculations above, we find that the average daily population in the jail during our analysis period is `r scales::comma(average_daily_population)`. By creating a data set in this way, we can also examine the trend of the daily population overtime. Examples of some graphics are shown below.
+
+```{r daily population graphics, include = TRUE}
+# what does the daily population look like overtime? note using a moving average
+# to smooth the estimates a little
+bookings_by_day %>% 
+  mutate(seven_day_moving_average = zoo::rollmean(daily_population, k = 7, fill = NA)) %>% 
+  ggplot(aes(x = date, y = daily_population)) + 
+  geom_point(alpha = 10, size = 2, color = "#EBCDC3") +
+  geom_line(aes(x = date, y = seven_day_moving_average), color = "#1F4045", size = 1.5) +
+  scale_y_continuous("Daily Population", limit = c(1000, 2000), labels = comma) + 
+  scale_x_date("Date", date_breaks = "1 month", date_labels = "%b %y") +
+  theme_minimal() +
+  theme(panel.grid.minor.x = element_blank()) +
+  labs(title = "Daily population of jail overtime.",
+       subtile = "Analysis period is from July 1st, 2021 to June 30th, 2022")
+
+# View the daily population against the average daily population. Around
+# what months is the daily population greater than the average?
+bookings_by_day %>% 
+  ggplot(aes(x = date, y = daily_population)) + 
+  geom_hline(aes(yintercept = average_daily_population), color = "#1F4045", size = 1, linetype = "dashed") + 
+  geom_point(alpha = 0.5, size = 2, color = "#EBCDC3") +
+  geom_text(x = ymd("2022-06-15"), y = 1600, size = 3.5,
+            label = paste0("Average: ", scales::comma(average_daily_population)), color = "#1F4045") + 
+  scale_y_continuous("Daily Population", limit = c(1000, 2000), labels = comma) + 
+  scale_x_date("Date", date_breaks = "1 month", date_labels = "%b %y") +
+  theme(panel.grid.minor.x = element_blank()) +
+  labs(title = "Daily population of jail vvertime compared to the average population for the year.",
+       subtile = "Analysis period is from July 1st, 2021 to June 30th, 2022") +
+  theme_minimal() + 
+  theme(panel.grid.minor.x = element_blank()) 
+```
+---
+
+### 6. Which day during that year had the lowest daily population? What was the population that day? Which day had the highest daily population? What was the population that day?
+
+```{r}
+# date with the lowest daily population 
+lowest_daily_pop <- bookings_by_day %>% 
+  filter(daily_population == min(daily_population))
+
+# date with the highest daily  population 
+highest_daily_pop <- bookings_by_day %>% 
+  filter(daily_population == max(daily_population))
+```
+
+`r format(lowest_daily_pop$date, "%B %d, %Y")` was the day with the lowest daily population of `r comma(lowest_daily_pop$daily_population)`. The day with the highest daily population was `r format(highest_daily_pop$date, "%B %d, %Y")` with a population of `r comma(highest_daily_pop$daily_population)`.
+
+---
+
+### 8. 
+
+```{r rebooking}
+# how many times are people rebooked (booked at least one time)
+rebooking <- los_data %>% 
+  arrange(person_id, date_in) %>% 
+  group_by(person_id) %>% 
+  mutate(frequency_booked = 1:n()) %>% 
+  ungroup() %>% 
+  arrange(person_id, desc(frequency_booked)) %>% 
+  distinct(person_id, .keep_all = T) %>% 
+  mutate(booked_multiple_times = ifelse(frequency_booked >= 2, "2+", "1")) 
+
+# review the total times people have been booked
+rebooking %>% 
+  tabyl(frequency_booked) %>% 
+  adorn_pct_formatting()
+
+# review how many people have been booked more than once
+rebooking %>% 
+  tabyl(booked_multiple_times) %>% 
+  adorn_pct_formatting()
+```
+
+- About 75.6% of people were only booked once
