@@ -31,6 +31,11 @@ install_and_load_packages <- function(packages){
   invisible(lapply(packages, library, character.only = TRUE))
 }
 
+addline_format <- function(x,...){
+    gsub(' or ','\n',x)
+}
+
+
 # load packages -----------------------------------------------------------
 project_packages <- c("openxlsx", "janitor", "dplyr", "scales", "lubridate",
                       "ggplot2", "zoo", "survival", "survminer", "coin")
@@ -164,12 +169,12 @@ bookings_during_extraction %>%
 
 ### 4. Consider the length of stay (LOS): the duration of each booking. Describe the LOS over the year analysis period. What insights (statistical and otherwise) does it provide you about variations in the jail population?
 
-To look at length of stay during the analysis period, I think it is best to look at the bookings that were from July 1, 2021 to June 30, 2022.
+To look at length of stay during the analysis period, I think it is best to look at the bookings that were from July 1, 2021 to June 30, 2022. Overall, the data seems to suggest that the people who are detained in jail tend to be changing frequently, if half the jail population is only detained for 3 days or less. 
 
-- About 48.5% of bookings had a length of stay of at least 3 days.
+- About 51.3% of bookings had a length of stay of at least 3 days.
 - The most frequent length of stay being 2 day.
 - There are about 25% of bookings that ranged from 10 days to 386.
-- About 75.3% of people were only booked once
+- About 75.6% of people were only booked once
 
 ```{r length of stay descriptive stats review}
 los_data <- bookings_in_analysis_period %>% 
@@ -219,10 +224,7 @@ rebooking %>%
   adorn_pct_formatting()
 ```
 
-From the review of the distribution, a survival analysis would make the most sense. In this scenario, we would be trying to understand the amount of time it takes a person who was booked to be released from jail during our analysis period.
-
-- release dates after study period are considered censored event.
-- release dates that are missing are considered a censored event.
+Additionally, the length of stay is positively skewed so if we wanted to examine what the median length of stay was for this population with 95% certainty, a survival analysis would make the most sense. In this scenario, we would be trying to understand the amount of time it takes a person who was booked to be released from jail during our analysis period.
 
 ```{r, length of stay survival analysis}
 # create the event flag and create a time flag that represents length of stay
@@ -249,7 +251,8 @@ km <- survival::survfit(Surv(time, event) ~ 1,
   data = survival_data
 )
 
-km
+km 
+
 
 # examine a graph of the probablity of release
 survminer::ggsurvplot(km,
@@ -258,7 +261,8 @@ survminer::ggsurvplot(km,
   legend = "none"
 )
 ```
-From this analysis, the median release time for a person can be estimated to be 4 days, with a 95% CI [4,4]. A next step would be to examine if an individual being booked again during the study period would impact their length of stay.
+
+From this analysis, the median release time for a person can be estimated to be 4 days, with a 95% CI [4,4]. One thing to note is that this median does differ from our review of the discriptive statistics because in this dataset we kept bookings with a missing date and whereas these bookings were excluded previous. A next step would be to examine if an individual being booked again during the study period would impact their length of stay.
 
 ---
 
@@ -310,7 +314,11 @@ bookings_by_day <- booking_long %>%
 
 # What is the average daily population for the analysis period?
 (average_daily_population <- mean(bookings_by_day$daily_population))
+```
 
+From the calculations above, we find that the average daily population in the jail during our analysis period is `r scales::comma(average_daily_population)`
+
+```{r}
 # what does the daily population look like overtime? note using a moving average
 # to smooth the estimates a little
 bookings_by_day %>% 
@@ -347,6 +355,12 @@ bookings_by_day %>%
 
 ### 7. Please provide a basic analysis of jail demographics during that year period. Are there meaningful statistical relationships among the different groups in the jail?
 
+For this analysis, we are assuming that each booking is a new person, where people who have been booked more than once will be double counted.
+
+- The majority of the jail population was men (77%) where their length of stay seemed longer and varied more compared to women.
+- A large proportion of the jail population was white (71%) and the variance of length of stay among the other race's seemed consistent, with the exception of the Asian or Pacific Islander group.
+- The age of the people in jail during this time period was also positively skewed where the jail population tends to be younger. At least 50% of the population was 33 years old and younger.
+
 ```{r booking demographic review}
 booking_demographics <- bookings_in_analysis_period %>% 
   # remove people with a missing release date
@@ -355,23 +369,25 @@ booking_demographics <- bookings_in_analysis_period %>%
   left_join(person_data) %>% 
   mutate(age_at_booking = floor(interval(dob, date_in) / years(1))) %>%
   # calculate length of stay
-  mutate(length_of_stay = as.numeric(release_out - date_in) + 1)
+  mutate(length_of_stay = as.numeric(release_out - date_in) + 1) %>% 
+  mutate(gender_ordered = factor(gender, levels = c("Male", "Female")))
 
 # descriptive stats by gender & length of stay distribution
 booking_demographics %>% 
-  group_by(gender) %>% 
+  group_by(gender_ordered) %>% 
   summarise(n = n(),
             median_los = median(length_of_stay),
-            mean_los = mean(length_of_stay)) %>% 
+            los_iqr = IQR(length_of_stay)) %>% 
   ungroup() %>% 
   mutate(total = sum(n),
          pct_of_total = scales::percent(n/total)) %>% 
-  select(gender, n, pct_of_total, median_los, mean_los)
+  select(gender_ordered, n, pct_of_total, median_los, los_iqr) %>% 
+  arrange(n)
 
 booking_demographics %>% 
-  ggplot(aes(x = length_of_stay)) +
-  geom_histogram() +
-  facet_grid(gender ~ .) +
+  ggplot(aes(x = length_of_stay, y = gender_ordered)) +
+  geom_boxplot() +
+  coord_flip() +
   theme_minimal()
 
 # descriptive stats by race & length of stay distribution
@@ -379,48 +395,104 @@ booking_demographics %>%
   group_by(race) %>% 
   summarise(n = n(),
             median_los = median(length_of_stay),
-            mean_los = mean(length_of_stay)) %>% 
+            los_iqr = IQR(length_of_stay)) %>% 
   ungroup() %>% 
   mutate(total = sum(n),
          pct_of_total = scales::percent(n/total)) %>% 
-  select(race, n, pct_of_total, median_los, mean_los)
+  select(race, n, pct_of_total, median_los, los_iqr) %>% 
+  arrange(n)
 
 booking_demographics %>% 
-  ggplot(aes(x = length_of_stay)) +
-  geom_histogram() +
-  facet_grid(race ~ .) +
+  mutate(race = addline_format(race)) %>% 
+  ggplot(aes(x = length_of_stay, y = race)) +
+  geom_boxplot() +
+  coord_flip() +
   theme_minimal()
 
 # descriptive stats by age
 booking_demographics %>% 
   filter(!is.na(age_at_booking)) %>% 
-  group_by(age_at_booking) %>% 
-  summarise(n = n(),
-            median_los = median(length_of_stay),
-            mean_los = mean(length_of_stay)) %>% 
+  summarise(median_age = median(age_at_booking),
+            mean_age = mean(age_at_booking)) %>% 
   ungroup() %>% 
-  mutate(total = sum(n),
-         pct_of_total = scales::percent(n/total)) %>% 
-  select(age_at_booking, n, pct_of_total, median_los, mean_los)
+  select(median_age, mean_age)
+
+booking_demographics %>% 
+  ggplot(aes(x = age_at_booking)) +
+  geom_histogram() +
+  theme_minimal()
+
 ```
+Because of how skewed the data is for length of stay amoung each demographic, I believe that Wilcoxon rank sum test would be the best way to examine the median by demographic and see if there is a difference between groups. To examine the median for race, people who are white are going to be the control group.
 
 ```{r booking median analysis}
+# is the median length of stay greater for male detainees than women detainees
+wilcox.test(formula = length_of_stay ~ gender_ordered,
+            data = booking_demographics,
+            extact = FALSE)
 
-max_los = max(booking_demographics$length_of_stay)
-# by gender there is a difference in median length of stay
-coin::median_test(inverse_los ~ factor(gender),
-                  data = booking_demographics %>% 
-                    mutate(inverse_los = (max_los + 1) - length_of_stay )
-                    )
+wilcox.test(formula = length_of_stay ~ gender_ordered,
+            data = booking_demographics,
+            extact = FALSE,
+            alternative = "greater")
 
-# by race there is a difference in median length of stay
-coin::median_test(inverse_los ~ factor(race),
-                  data = booking_demographics %>% 
-                    mutate(inverse_los = (max_los + 1) - length_of_stay )
-                    )
+# is the median length of stay less for white than other races?
+
+## Asian or Pacific Islander
+white_and_asian_pacific_islander <- booking_demographics %>% 
+  filter(race == "White" |
+           race == "Asian or Pacific Islander") %>% 
+  mutate(race_ordered = factor(race, levels = c("White", "Asian or Pacific Islander")))
+
+wilcox.test(formula = length_of_stay ~ race_ordered,
+            data = white_and_asian_pacific_islander,
+            extact = FALSE)
+
+## American Indian or Alaska Native
+white_and_american_indian <- booking_demographics %>% 
+  filter(race == "White" |
+           race == "American Indian or Alaska Native") %>% 
+  mutate(race_ordered = factor(race, levels = c("White", "American Indian or Alaska Native")))
+
+wilcox.test(formula = length_of_stay ~ race_ordered,
+            data = white_and_american_indian,
+            extact = FALSE)
+
+wilcox.test(formula = length_of_stay ~ race_ordered,
+            data = white_and_american_indian,
+            extact = FALSE, alternative = "greater")
+
+## Unknown 
+white_and_unknown <- booking_demographics %>% 
+  filter(race == "White" |
+           race == "Unknown") %>% 
+  mutate(race_ordered = factor(race, levels = c("White", "Unknown")))
+
+wilcox.test(formula = length_of_stay ~ race_ordered,
+            data = white_and_unknown,
+            extact = FALSE)
+
+## Black
+white_and_black <- booking_demographics %>% 
+  filter(race == "White" |
+           race == "Black") %>% 
+  mutate(race_ordered = factor(race, levels = c("White", "Black")))
+
+wilcox.test(formula = length_of_stay ~ race_ordered,
+            data = white_and_black,
+            extact = FALSE)
+
 ```
-
+The Wilcoxon test showed that the medians were significantly different (p<0.0001) between men and women in our jail population where the median length of stay for women was 3 (IRQ = 6) and the median length of stay among men was 3 (IQR = 9). An additional Wilcoxon test showed that the difference median was significantly different (p<0.0279) between the white jail detainees who had a median length of stay of 3 (IQR = 8) and American Indian or Alaska Natives who had a median length of stay of 3 (IR = 8.5).
 
 ---
 
 ### 8. What other insights, useful facts, or questions/concerns did you uncover, if any, in the data?
+
+- While working with this data, I was curious about what others have noticed when it comes to length of stay amoung people who are detained. One similarlity that I noticed between this data and the peer reviewed papers that I found published was how young people were when detained. In the paper that I found, a relationship the researchers noticed amoung their cohort was that the length of stay was longer for people who were younger. I would love to investigate this further and see if this relationship is seen in this study population.
+
+- An additional research question I found while getting familiar with this topic was the relationship to length of stay and being detained more than once. Among the bookings in this analysis period, 24.4% of people were detained more than once so I wonder how this impacted an individuals second stay. This could be examined using a survival analysis.
+
+- Due to the large population of bookings with length of stays that were 10 days or longer (26%), I would like to examine the demographic differences betwen people with a short, medium, and long length of stay. An analysis that looked at these 3 categories might give us more insight to the relationship between demographics and length of stay.
+
+- Lastly, I would like to make a visual that compares the number of people detained by race in our analysis year to the general ppopulation and maybe narrow this down to the state or county the jail is located to see if the population in the jail mirrors or is different to the general public. An example of the graphic I am thinking about can be found here: https://stephanieevergreen.com/proportion-plots/
